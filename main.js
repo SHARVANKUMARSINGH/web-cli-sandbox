@@ -10,12 +10,36 @@ const workspace = document.getElementById('workspace');
 const terminalEl = document.getElementById('terminal-container');
 const chatHistory = document.getElementById('chat-history');
 const vfsTree = document.getElementById('vfs-tree');
+const modelSelector = document.getElementById('model-selector');
 
 let webcontainerInstance;
 let apiKey = '';
 let projectFolder = '';
+let selectedAiModel = 'meta-llama/llama-3.1-8b-instruct:free'; // fallback
 
-// Terminal Setup (Monospace, no gaps)
+// Load Free Models from OpenRouter API
+async function loadFreeModels() {
+  try {
+    const res = await fetch('https://openrouter.ai/api/v1/models');
+    const data = await res.json();
+    // Filter models where prompt and completion pricing is zero
+    const freeModels = data.data.filter(m => m.pricing && Number(m.pricing.prompt) === 0 && Number(m.pricing.completion) === 0);
+    
+    modelSelector.innerHTML = freeModels.map(m => 
+      `<option value="${m.id}">${m.name} (Free)</option>`
+    ).join('');
+    
+    // Auto-select Gemini Flash if available, otherwise just use the first one
+    const gemini = freeModels.find(m => m.id.includes('gemini-2.5-flash'));
+    if(gemini) modelSelector.value = gemini.id;
+
+  } catch (error) {
+    modelSelector.innerHTML = '<option value="meta-llama/llama-3.1-8b-instruct:free">Llama 3.1 8B (Fallback)</option>';
+  }
+}
+window.addEventListener('load', loadFreeModels);
+
+// Terminal Setup
 const term = new Terminal({ 
   convertEol: true, 
   fontFamily: '"Fira Code", monospace, "Courier New"', 
@@ -26,7 +50,7 @@ const term = new Terminal({
 const fitAddon = new FitAddon();
 term.loadAddon(fitAddon);
 
-// UI Navigation & Tabs
+// UI Navigation
 document.getElementById('start-btn').addEventListener('click', () => {
   screenLanding.classList.remove('active');
   screenSetup.classList.add('active');
@@ -34,11 +58,9 @@ document.getElementById('start-btn').addEventListener('click', () => {
 
 document.querySelectorAll('.tab-btn').forEach(btn => {
   btn.addEventListener('click', (e) => {
-    // Reset all tabs
     document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
     document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
     
-    // Activate clicked tab
     const target = btn.getAttribute('data-target');
     btn.classList.add('active');
     document.getElementById(target).classList.add('active');
@@ -50,6 +72,8 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
 document.getElementById('init-btn').addEventListener('click', async () => {
   apiKey = document.getElementById('api-key').value;
   projectFolder = document.getElementById('vfs-folder').value || 'my-app';
+  selectedAiModel = modelSelector.value;
+  
   if (!apiKey.startsWith('sk-or')) return alert('Please enter a valid OpenRouter key');
 
   screenSetup.classList.remove('active');
@@ -58,20 +82,17 @@ document.getElementById('init-btn').addEventListener('click', async () => {
   
   term.open(terminalEl);
   fitAddon.fit();
-  
   await bootEnvironment();
 });
 
-// Boot Container & VFS Setup
 async function bootEnvironment() {
-  term.write('\x1b[1;36m<System>\x1b[0m Booting isolated Virtual File System...\r\n');
+  term.write('\x1b[1;36m<System>\x1b[0m Booting Virtual File System...\r\n');
   webcontainerInstance = await WebContainer.boot();
   await webcontainerInstance.fs.mkdir(projectFolder);
   term.write('\x1b[1;32m<System>\x1b[0m Environment ready!\r\n');
   updateVFS();
 }
 
-// Recursive function to build nested folder UI
 async function buildTree(path, container, padding = 0) {
   const entries = await webcontainerInstance.fs.readdir(path, { withFileTypes: true });
   for (const entry of entries) {
@@ -95,7 +116,6 @@ async function updateVFS() {
   await buildTree(`/${projectFolder}`, vfsTree, 5);
 }
 
-// Braille Spinner
 const brailleFrames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 let spinnerInterval;
 
@@ -116,7 +136,6 @@ function setThinking(active) {
   }
 }
 
-// OpenRouter API
 async function callOpenRouter(prompt) {
   const isAutoFix = prompt.includes('failed with exit code');
   if (!isAutoFix) addChatMessage(prompt, 'user');
@@ -124,24 +143,27 @@ async function callOpenRouter(prompt) {
   document.getElementById('prompt-input').value = '';
   setThinking(true);
   
-  const systemPrompt = `You are an AI coding assistant inside a WebContainer IDE.
-The current project folder is /${projectFolder}.
-You CAN create nested subfolders (e.g., src/components/App.js).
-To CREATE or EDIT a file, use EXACTLY this format:
-\`\`\`file:path/to/filename.ext
-(code here)
+  // ULTRA STRICT PROMPT TO PREVENT HALLUCINATIONS
+  const systemPrompt = `You are an expert, autonomous AI coding assistant running inside a WebContainer environment.
+WORKSPACE DIR: /${projectFolder}
+CRITICAL INSTRUCTIONS - YOU MUST FOLLOW STRICT FORMATTING:
+1. NEVER output naked code. YOU MUST ALWAYS USE THE EXACT FILE BLOCK FORMAT to create/edit files.
+2. FILE FORMAT (To write/edit a file, output this exact structure):
+\`\`\`file:src/App.js
+console.log("hello");
 \`\`\`
-To RUN a COMMAND, use EXACTLY this format:
+3. COMMAND FORMAT (To run a terminal command, output this exact structure):
 \`\`\`command
-(command here)
-\`\`\``;
+npm install react
+\`\`\`
+If you do not use these exact blocks, the system will fail. Create necessary subfolders automatically.`;
 
   try {
     const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
       method: "POST",
       headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
       body: JSON.stringify({
-        model: "meta-llama/llama-3.1-8b-instruct",
+        model: selectedAiModel,
         messages: [{ role: "system", content: systemPrompt }, { role: "user", content: prompt }]
       })
     });
@@ -155,28 +177,23 @@ To RUN a COMMAND, use EXACTLY this format:
   }
 }
 
-// Ensure subdirectories exist before writing files
 async function ensureDirExists(filePath) {
   const parts = filePath.split('/');
-  parts.pop(); // Remove the file name
+  parts.pop();
   let currentPath = `/${projectFolder}`;
   
   for (const part of parts) {
     currentPath += `/${part}`;
     try {
       await webcontainerInstance.fs.mkdir(currentPath);
-    } catch (e) {
-      // Directory already exists, ignore error
-    }
+    } catch (e) {}
   }
 }
 
-// Parse Response
 async function processAIResponse(text) {
   let cleanText = text.replace(/```file:[^\n]+\n[\s\S]*?```/g, '').replace(/```command\n[\s\S]*?```/g, '').trim();
   if (cleanText) addChatMessage(cleanText, 'ai');
 
-  // 1. Process Files (with nested folders)
   const fileRegex = /```file:([^\n]+)\n([\s\S]*?)```/g;
   let fileMatch;
   while ((fileMatch = fileRegex.exec(text)) !== null) {
@@ -202,7 +219,6 @@ async function processAIResponse(text) {
   }
   updateVFS();
 
-  // 2. Process Commands (with Colored Terminal Logging)
   const cmdRegex = /```command\n([\s\S]*?)```/g;
   let cmdMatch;
   while ((cmdMatch = cmdRegex.exec(text)) !== null) {
@@ -214,22 +230,39 @@ async function processAIResponse(text) {
     chatHistory.appendChild(badge);
     chatHistory.scrollTop = chatHistory.scrollHeight;
 
-    // Output beautifully colored headers to the Terminal
     term.write(`\r\n\x1b[1;35m🤖 <Ai Executing>:\x1b[0m \x1b[1;36m${commandStr}\x1b[0m\r\n`);
     term.write(`\x1b[1;33m💻 <Terminal Output>:\x1b[0m\r\n`);
 
     const args = commandStr.match(/(?:[^\s"]+|"[^"]*")+/g).map(s => s.replace(/"/g, ''));
     const process = await webcontainerInstance.spawn(args[0], args.slice(1), { cwd: `/${projectFolder}` });
     
-    let errorOutput = '';
+    // THE 4-SECOND TERMINAL STALL DETECTOR 
+    const inputWriter = process.input.getWriter();
+    let processOutput = '';
+    let stallTimer;
+
     process.output.pipeTo(new WritableStream({
       write(data) { 
         term.write(data); 
-        errorOutput += data; 
+        processOutput += data; 
+        
+        // Reset the 4 second timer on every new output
+        clearTimeout(stallTimer);
+        stallTimer = setTimeout(() => {
+          const lowerOut = processOutput.toLowerCase();
+          // If the output ended in a common prompt waiting for "y"
+          if (lowerOut.includes('y/n') || lowerOut.includes('ok to proceed') || lowerOut.includes('(y)')) {
+            term.write('\r\n\x1b[1;33m🤖 <Ai Auto-Heal>: Detected stalled prompt. Typing "y" and proceeding...\x1b[0m\r\n');
+            inputWriter.write('y\r'); // Injects 'y' and Enter directly into the terminal
+          }
+        }, 4000);
       }
     }));
 
     const exitCode = await process.exit;
+    clearTimeout(stallTimer); // Clear it so it doesn't fire after command finishes
+    inputWriter.releaseLock();
+    
     if (exitCode !== 0) {
       const errBadge = document.createElement('div');
       errBadge.className = `action-badge error`;
@@ -237,13 +270,12 @@ async function processAIResponse(text) {
       chatHistory.appendChild(errBadge);
       
       setTimeout(() => {
-        callOpenRouter(`The command "${commandStr}" failed with exit code ${exitCode}. Error output:\n${errorOutput}\n\nPlease fix the files or provide the correct command.`);
+        callOpenRouter(`The command "${commandStr}" failed with exit code ${exitCode}. Error output:\n${processOutput}\n\nPlease fix the files or provide the correct command.`);
       }, 2000);
     }
   }
 }
 
-// Download Recursive ZIP
 document.getElementById('download-zip-btn').addEventListener('click', async () => {
   const zip = new JSZip();
   async function addFolder(dirPath, zipFolder) {
