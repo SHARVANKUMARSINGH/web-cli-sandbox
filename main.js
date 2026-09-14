@@ -17,6 +17,7 @@ let webcontainerInstance;
 let apiKey = '';
 let projectFolder = '';
 let selectedAiModel = 'meta-llama/llama-3.1-8b-instruct:free';
+let conversationMemory = []; // NEW: Gives the AI memory of the session
 
 // Load Free Models from OpenRouter API
 async function loadFreeModels() {
@@ -93,6 +94,14 @@ async function bootEnvironment() {
 
 async function buildTree(path, container, padding = 0) {
   const entries = await webcontainerInstance.fs.readdir(path, { withFileTypes: true });
+  
+  // Sort folders first, then files
+  entries.sort((a, b) => {
+    if (a.isDirectory() && !b.isDirectory()) return -1;
+    if (!a.isDirectory() && b.isDirectory()) return 1;
+    return a.name.localeCompare(b.name);
+  });
+
   for (const entry of entries) {
     const div = document.createElement('div');
     div.className = 'vfs-node';
@@ -101,7 +110,10 @@ async function buildTree(path, container, padding = 0) {
     if (entry.isDirectory()) {
       div.innerHTML = `<i class="codicon codicon-folder" style="color:#eab308"></i> <b>${entry.name}</b>`;
       container.appendChild(div);
-      await buildTree(`${path}/${entry.name}`, container, padding + 15);
+      // Exclude node_modules so the tree doesn't crash from too many files
+      if (entry.name !== 'node_modules' && entry.name !== '.git') {
+        await buildTree(`${path}/${entry.name}`, container, padding + 15);
+      }
     } else {
       div.innerHTML = `<i class="codicon codicon-file" style="color:#6b7280"></i> ${entry.name}`;
       container.appendChild(div);
@@ -119,7 +131,6 @@ let spinnerInterval;
 
 function setThinking(active) {
   if (active) {
-    // Prevent multiple spinners if you click Send twice
     if (document.getElementById('spinner-id')) return;
     let idx = 0;
     const div = document.createElement('div');
@@ -146,19 +157,27 @@ async function callOpenRouter(prompt) {
   promptInput.value = '';
   setThinking(true);
   
-  const systemPrompt = `You are an expert, autonomous AI coding assistant running inside a WebContainer environment.
-WORKSPACE DIR: /${projectFolder}
-CRITICAL INSTRUCTIONS - YOU MUST FOLLOW STRICT FORMATTING:
-1. NEVER output naked code. YOU MUST ALWAYS USE THE EXACT FILE BLOCK FORMAT to create/edit files.
-2. FILE FORMAT (To write/edit a file, output this exact structure):
-\`\`\`file:src/App.js
-console.log("hello");
+  // Add the user's prompt to the conversation memory
+  conversationMemory.push({ role: "user", content: prompt });
+  
+  // Keep memory strictly to the last 6 messages so free models don't crash from context limits
+  if (conversationMemory.length > 6) {
+    conversationMemory = conversationMemory.slice(conversationMemory.length - 6);
+  }
+
+  const systemPrompt = `You are an expert AI coding assistant inside a browser WebContainer.
+Workspace: /${projectFolder}
+
+CRITICAL RULES:
+1. ONLY USE ONE COMMAND AT A TIME. Do not write 5 command blocks in one response.
+2. To write a file, use EXACTLY this format:
+\`\`\`file:src/index.html
+<h1>Hello</h1>
 \`\`\`
-3. COMMAND FORMAT (To run a terminal command, output this exact structure):
+3. To run a command, use EXACTLY this format:
 \`\`\`command
-npm install react
-\`\`\`
-If you do not use these exact blocks, the system will fail. Create necessary subfolders automatically.`;
+npm install
+\`\`\``;
 
   try {
     const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
@@ -166,31 +185,29 @@ If you do not use these exact blocks, the system will fail. Create necessary sub
       headers: { 
         "Authorization": `Bearer ${apiKey}`, 
         "Content-Type": "application/json",
-        // THESE TWO HEADERS ARE CRITICAL FOR OPENROUTER
         "HTTP-Referer": window.location.href,
         "X-Title": "Web IDE Sandbox"
       },
       body: JSON.stringify({
         model: selectedAiModel,
-        messages: [{ role: "system", content: systemPrompt }, { role: "user", content: prompt }]
+        messages: [{ role: "system", content: systemPrompt }, ...conversationMemory]
       })
     });
 
     const data = await response.json();
     setThinking(false);
 
-    // Explicitly catch and show API errors (like bad keys or rate limits)
-    if (data.error) {
-      return addChatMessage(`<b>API Error:</b> ${data.error.message}`, 'ai');
-    }
-    if (!data.choices || !data.choices[0]) {
-      return addChatMessage(`<b>Error:</b> Unexpected API response structure.`, 'ai');
-    }
+    if (data.error) return addChatMessage(`<b>API Error:</b> ${data.error.message}`, 'ai');
+    
+    const aiText = data.choices[0].message.content;
+    
+    // Save the AI's response to memory so it remembers what it just did
+    conversationMemory.push({ role: "assistant", content: aiText });
 
-    await processAIResponse(data.choices[0].message.content);
+    await processAIResponse(aiText);
   } catch (error) {
     setThinking(false);
-    addChatMessage(`<b>Network Error:</b> ${error.message} (Check your connection or API key)`, 'ai');
+    addChatMessage(`<b>Network Error:</b> ${error.message}`, 'ai');
   }
 }
 
@@ -277,6 +294,9 @@ async function processAIResponse(text) {
     clearTimeout(stallTimer);
     inputWriter.releaseLock();
     
+    // NEW: Refresh the File Explorer immediately after the terminal command finishes downloading files!
+    updateVFS(); 
+    
     if (exitCode !== 0) {
       const errBadge = document.createElement('div');
       errBadge.className = `action-badge error`;
@@ -295,6 +315,9 @@ document.getElementById('download-zip-btn').addEventListener('click', async () =
   async function addFolder(dirPath, zipFolder) {
     const entries = await webcontainerInstance.fs.readdir(dirPath, { withFileTypes: true });
     for (const entry of entries) {
+      // Exclude node_modules from the zip download so it doesn't crash your phone
+      if (entry.name === 'node_modules') continue;
+      
       const fullPath = `${dirPath}/${entry.name}`;
       if (entry.isDirectory()) {
         await addFolder(fullPath, zipFolder.folder(entry.name));
@@ -325,7 +348,6 @@ document.getElementById('send-btn').addEventListener('click', () => {
   if (prompt) callOpenRouter(prompt);
 });
 
-// Added: Pressing Enter on mobile keyboards now automatically sends the message
 promptInput.addEventListener('keypress', (e) => {
   if (e.key === 'Enter') {
     const prompt = promptInput.value;
