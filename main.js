@@ -11,28 +11,26 @@ const terminalEl = document.getElementById('terminal-container');
 const chatHistory = document.getElementById('chat-history');
 const vfsTree = document.getElementById('vfs-tree');
 const modelSelector = document.getElementById('model-selector');
+const promptInput = document.getElementById('prompt-input');
 
 let webcontainerInstance;
 let apiKey = '';
 let projectFolder = '';
-let selectedAiModel = 'meta-llama/llama-3.1-8b-instruct:free'; // fallback
+let selectedAiModel = 'meta-llama/llama-3.1-8b-instruct:free';
 
 // Load Free Models from OpenRouter API
 async function loadFreeModels() {
   try {
     const res = await fetch('https://openrouter.ai/api/v1/models');
     const data = await res.json();
-    // Filter models where prompt and completion pricing is zero
     const freeModels = data.data.filter(m => m.pricing && Number(m.pricing.prompt) === 0 && Number(m.pricing.completion) === 0);
     
     modelSelector.innerHTML = freeModels.map(m => 
       `<option value="${m.id}">${m.name} (Free)</option>`
     ).join('');
     
-    // Auto-select Gemini Flash if available, otherwise just use the first one
     const gemini = freeModels.find(m => m.id.includes('gemini-2.5-flash'));
-    if(gemini) modelSelector.value = gemini.id;
-
+    if (gemini) modelSelector.value = gemini.id;
   } catch (error) {
     modelSelector.innerHTML = '<option value="meta-llama/llama-3.1-8b-instruct:free">Llama 3.1 8B (Fallback)</option>';
   }
@@ -70,11 +68,11 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
 });
 
 document.getElementById('init-btn').addEventListener('click', async () => {
-  apiKey = document.getElementById('api-key').value;
-  projectFolder = document.getElementById('vfs-folder').value || 'my-app';
-  selectedAiModel = modelSelector.value;
+  apiKey = document.getElementById('api-key').value.trim();
+  projectFolder = document.getElementById('vfs-folder').value.trim() || 'my-app';
+  selectedAiModel = modelSelector.value || 'meta-llama/llama-3.1-8b-instruct:free';
   
-  if (!apiKey.startsWith('sk-or')) return alert('Please enter a valid OpenRouter key');
+  if (!apiKey.startsWith('sk-or')) return alert('Please enter a valid OpenRouter key starting with sk-or');
 
   screenSetup.classList.remove('active');
   workspace.style.display = 'flex';
@@ -121,18 +119,23 @@ let spinnerInterval;
 
 function setThinking(active) {
   if (active) {
+    // Prevent multiple spinners if you click Send twice
+    if (document.getElementById('spinner-id')) return;
     let idx = 0;
     const div = document.createElement('div');
     div.className = 'msg thinking';
     div.id = 'spinner-id';
     chatHistory.appendChild(div);
+    chatHistory.scrollTop = chatHistory.scrollHeight;
+    
     spinnerInterval = setInterval(() => {
       div.innerText = `Thinking ${brailleFrames[idx]}`;
       idx = (idx + 1) % brailleFrames.length;
     }, 100);
   } else {
     clearInterval(spinnerInterval);
-    document.getElementById('spinner-id')?.remove();
+    const spinner = document.getElementById('spinner-id');
+    if (spinner) spinner.remove();
   }
 }
 
@@ -140,10 +143,9 @@ async function callOpenRouter(prompt) {
   const isAutoFix = prompt.includes('failed with exit code');
   if (!isAutoFix) addChatMessage(prompt, 'user');
   
-  document.getElementById('prompt-input').value = '';
+  promptInput.value = '';
   setThinking(true);
   
-  // ULTRA STRICT PROMPT TO PREVENT HALLUCINATIONS
   const systemPrompt = `You are an expert, autonomous AI coding assistant running inside a WebContainer environment.
 WORKSPACE DIR: /${projectFolder}
 CRITICAL INSTRUCTIONS - YOU MUST FOLLOW STRICT FORMATTING:
@@ -161,7 +163,13 @@ If you do not use these exact blocks, the system will fail. Create necessary sub
   try {
     const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
       method: "POST",
-      headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
+      headers: { 
+        "Authorization": `Bearer ${apiKey}`, 
+        "Content-Type": "application/json",
+        // THESE TWO HEADERS ARE CRITICAL FOR OPENROUTER
+        "HTTP-Referer": window.location.href,
+        "X-Title": "Web IDE Sandbox"
+      },
       body: JSON.stringify({
         model: selectedAiModel,
         messages: [{ role: "system", content: systemPrompt }, { role: "user", content: prompt }]
@@ -170,10 +178,19 @@ If you do not use these exact blocks, the system will fail. Create necessary sub
 
     const data = await response.json();
     setThinking(false);
+
+    // Explicitly catch and show API errors (like bad keys or rate limits)
+    if (data.error) {
+      return addChatMessage(`<b>API Error:</b> ${data.error.message}`, 'ai');
+    }
+    if (!data.choices || !data.choices[0]) {
+      return addChatMessage(`<b>Error:</b> Unexpected API response structure.`, 'ai');
+    }
+
     await processAIResponse(data.choices[0].message.content);
   } catch (error) {
     setThinking(false);
-    addChatMessage(`Error: ${error.message}`, 'ai');
+    addChatMessage(`<b>Network Error:</b> ${error.message} (Check your connection or API key)`, 'ai');
   }
 }
 
@@ -236,7 +253,6 @@ async function processAIResponse(text) {
     const args = commandStr.match(/(?:[^\s"]+|"[^"]*")+/g).map(s => s.replace(/"/g, ''));
     const process = await webcontainerInstance.spawn(args[0], args.slice(1), { cwd: `/${projectFolder}` });
     
-    // THE 4-SECOND TERMINAL STALL DETECTOR 
     const inputWriter = process.input.getWriter();
     let processOutput = '';
     let stallTimer;
@@ -246,21 +262,19 @@ async function processAIResponse(text) {
         term.write(data); 
         processOutput += data; 
         
-        // Reset the 4 second timer on every new output
         clearTimeout(stallTimer);
         stallTimer = setTimeout(() => {
           const lowerOut = processOutput.toLowerCase();
-          // If the output ended in a common prompt waiting for "y"
           if (lowerOut.includes('y/n') || lowerOut.includes('ok to proceed') || lowerOut.includes('(y)')) {
             term.write('\r\n\x1b[1;33m🤖 <Ai Auto-Heal>: Detected stalled prompt. Typing "y" and proceeding...\x1b[0m\r\n');
-            inputWriter.write('y\r'); // Injects 'y' and Enter directly into the terminal
+            inputWriter.write('y\r');
           }
         }, 4000);
       }
     }));
 
     const exitCode = await process.exit;
-    clearTimeout(stallTimer); // Clear it so it doesn't fire after command finishes
+    clearTimeout(stallTimer);
     inputWriter.releaseLock();
     
     if (exitCode !== 0) {
@@ -301,13 +315,22 @@ document.getElementById('download-zip-btn').addEventListener('click', async () =
 function addChatMessage(text, sender) {
   const div = document.createElement('div');
   div.className = `msg ${sender}`;
-  div.innerText = text;
+  div.innerHTML = text; 
   chatHistory.appendChild(div);
   chatHistory.scrollTop = chatHistory.scrollHeight;
 }
 
 document.getElementById('send-btn').addEventListener('click', () => {
-  const prompt = document.getElementById('prompt-input').value;
+  const prompt = promptInput.value;
   if (prompt) callOpenRouter(prompt);
 });
+
+// Added: Pressing Enter on mobile keyboards now automatically sends the message
+promptInput.addEventListener('keypress', (e) => {
+  if (e.key === 'Enter') {
+    const prompt = promptInput.value;
+    if (prompt) callOpenRouter(prompt);
+  }
+});
+
 window.addEventListener('resize', () => fitAddon.fit());
