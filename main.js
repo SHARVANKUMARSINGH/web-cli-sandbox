@@ -15,23 +15,36 @@ let webcontainerInstance;
 let apiKey = '';
 let projectFolder = '';
 
-// Terminal Setup (Fixed font gaps)
+// Terminal Setup (Monospace, no gaps)
 const term = new Terminal({ 
   convertEol: true, 
   fontFamily: '"Fira Code", monospace, "Courier New"', 
-  fontSize: 14,
+  fontSize: 13,
   letterSpacing: 0,
-  lineHeight: 1.2,
-  cursorBlink: true,
   theme: { background: '#000000' } 
 });
 const fitAddon = new FitAddon();
 term.loadAddon(fitAddon);
 
-// UI Navigation
+// UI Navigation & Tabs
 document.getElementById('start-btn').addEventListener('click', () => {
   screenLanding.classList.remove('active');
   screenSetup.classList.add('active');
+});
+
+document.querySelectorAll('.tab-btn').forEach(btn => {
+  btn.addEventListener('click', (e) => {
+    // Reset all tabs
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+    
+    // Activate clicked tab
+    const target = btn.getAttribute('data-target');
+    btn.classList.add('active');
+    document.getElementById(target).classList.add('active');
+    
+    if (target === 'panel-terminal') fitAddon.fit();
+  });
 });
 
 document.getElementById('init-btn').addEventListener('click', async () => {
@@ -49,31 +62,40 @@ document.getElementById('init-btn').addEventListener('click', async () => {
   await bootEnvironment();
 });
 
-// Boot Container & VFS Update
+// Boot Container & VFS Setup
 async function bootEnvironment() {
-  term.write('Booting isolated Virtual File System...\r\n');
+  term.write('\x1b[1;36m<System>\x1b[0m Booting isolated Virtual File System...\r\n');
   webcontainerInstance = await WebContainer.boot();
   await webcontainerInstance.fs.mkdir(projectFolder);
-  term.write('\x1b[32mEnvironment ready!\x1b[0m\r\n');
+  term.write('\x1b[1;32m<System>\x1b[0m Environment ready!\r\n');
   updateVFS();
+}
+
+// Recursive function to build nested folder UI
+async function buildTree(path, container, padding = 0) {
+  const entries = await webcontainerInstance.fs.readdir(path, { withFileTypes: true });
+  for (const entry of entries) {
+    const div = document.createElement('div');
+    div.className = 'vfs-node';
+    div.style.paddingLeft = `${padding}px`;
+    
+    if (entry.isDirectory()) {
+      div.innerHTML = `<i class="codicon codicon-folder" style="color:#eab308"></i> <b>${entry.name}</b>`;
+      container.appendChild(div);
+      await buildTree(`${path}/${entry.name}`, container, padding + 15);
+    } else {
+      div.innerHTML = `<i class="codicon codicon-file" style="color:#6b7280"></i> ${entry.name}`;
+      container.appendChild(div);
+    }
+  }
 }
 
 async function updateVFS() {
   vfsTree.innerHTML = '';
-  const entries = await webcontainerInstance.fs.readdir(`/${projectFolder}`, { withFileTypes: true });
-  for (const entry of entries) {
-    const div = document.createElement('div');
-    div.className = 'vfs-node';
-    if (entry.isDirectory()) {
-      div.innerHTML = `<i class="codicon codicon-folder" style="color:#eab308"></i> ${entry.name}`;
-    } else {
-      div.innerHTML = `<i class="codicon codicon-file"></i> ${entry.name}`;
-    }
-    vfsTree.appendChild(div);
-  }
+  await buildTree(`/${projectFolder}`, vfsTree, 5);
 }
 
-// Braille Spinner Logic
+// Braille Spinner
 const brailleFrames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 let spinnerInterval;
 
@@ -84,7 +106,6 @@ function setThinking(active) {
     div.className = 'msg thinking';
     div.id = 'spinner-id';
     chatHistory.appendChild(div);
-    
     spinnerInterval = setInterval(() => {
       div.innerText = `Thinking ${brailleFrames[idx]}`;
       idx = (idx + 1) % brailleFrames.length;
@@ -95,7 +116,7 @@ function setThinking(active) {
   }
 }
 
-// AI Integration & Action Parsing
+// OpenRouter API
 async function callOpenRouter(prompt) {
   const isAutoFix = prompt.includes('failed with exit code');
   if (!isAutoFix) addChatMessage(prompt, 'user');
@@ -103,17 +124,17 @@ async function callOpenRouter(prompt) {
   document.getElementById('prompt-input').value = '';
   setThinking(true);
   
-  const systemPrompt = `You are an AI coding assistant inside a WebContainer browser IDE.
+  const systemPrompt = `You are an AI coding assistant inside a WebContainer IDE.
 The current project folder is /${projectFolder}.
-To CREATE or EDIT a file, you MUST use exactly this format:
-\`\`\`file:filename.ext
+You CAN create nested subfolders (e.g., src/components/App.js).
+To CREATE or EDIT a file, use EXACTLY this format:
+\`\`\`file:path/to/filename.ext
 (code here)
 \`\`\`
-To RUN a COMMAND, you MUST use exactly this format:
+To RUN a COMMAND, use EXACTLY this format:
 \`\`\`command
 (command here)
-\`\`\`
-Provide a brief conversational response before using the action blocks.`;
+\`\`\``;
 
   try {
     const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
@@ -128,59 +149,60 @@ Provide a brief conversational response before using the action blocks.`;
     const data = await response.json();
     setThinking(false);
     await processAIResponse(data.choices[0].message.content);
-    
   } catch (error) {
     setThinking(false);
-    addChatMessage(`Error calling AI: ${error.message}`, 'ai');
+    addChatMessage(`Error: ${error.message}`, 'ai');
   }
 }
 
-// Parse Response & Render Badges
+// Ensure subdirectories exist before writing files
+async function ensureDirExists(filePath) {
+  const parts = filePath.split('/');
+  parts.pop(); // Remove the file name
+  let currentPath = `/${projectFolder}`;
+  
+  for (const part of parts) {
+    currentPath += `/${part}`;
+    try {
+      await webcontainerInstance.fs.mkdir(currentPath);
+    } catch (e) {
+      // Directory already exists, ignore error
+    }
+  }
+}
+
+// Parse Response
 async function processAIResponse(text) {
-  // Strip the action blocks to show the user just the clean chat text
   let cleanText = text.replace(/```file:[^\n]+\n[\s\S]*?```/g, '').replace(/```command\n[\s\S]*?```/g, '').trim();
   if (cleanText) addChatMessage(cleanText, 'ai');
 
-  // 1. Process Files
+  // 1. Process Files (with nested folders)
   const fileRegex = /```file:([^\n]+)\n([\s\S]*?)```/g;
   let fileMatch;
   while ((fileMatch = fileRegex.exec(text)) !== null) {
-    const fileName = fileMatch[1].trim();
+    const filePath = fileMatch[1].trim();
     const content = fileMatch[2];
-    const fullPath = `/${projectFolder}/${fileName}`;
+    const fullPath = `/${projectFolder}/${filePath}`;
     
-    // Check if it's an edit to calculate lines
-    let oldLines = 0;
+    await ensureDirExists(filePath);
+    
     let isEdit = false;
     try {
-      const existing = await webcontainerInstance.fs.readFile(fullPath, 'utf-8');
-      oldLines = existing.split('\n').length;
+      await webcontainerInstance.fs.readFile(fullPath, 'utf-8');
       isEdit = true;
-    } catch (e) {} // File doesn't exist yet
+    } catch (e) {}
 
-    // Write file to Virtual File System
     await webcontainerInstance.fs.writeFile(fullPath, content);
     
-    const newLines = content.split('\n').length;
-    const diff = newLines - oldLines;
-    const addStr = diff >= 0 ? `+${diff}` : '0';
-    const delStr = diff < 0 ? `${diff}` : '-0';
-
-    // UI Badge
     const badge = document.createElement('div');
     badge.className = `action-badge ${isEdit ? 'edit' : 'create'}`;
-    badge.innerHTML = `
-      <i class="codicon codicon-${isEdit ? 'edit' : 'new-file'}"></i> 
-      <div><b>${isEdit ? 'Edited' : 'Created'}</b> ${fileName}</div>
-      ${isEdit ? `<div class="diff-text"><span class="diff-add">${addStr}</span> <span class="diff-del">${delStr}</span> lines</div>` : ''}
-    `;
+    badge.innerHTML = `<i class="codicon codicon-${isEdit ? 'edit' : 'new-file'}"></i> <div><b>${isEdit ? 'Edited' : 'Created'}</b> ${filePath}</div>`;
     chatHistory.appendChild(badge);
     chatHistory.scrollTop = chatHistory.scrollHeight;
-    
-    updateVFS(); // Refresh sidebar
   }
+  updateVFS();
 
-  // 2. Process Commands
+  // 2. Process Commands (with Colored Terminal Logging)
   const cmdRegex = /```command\n([\s\S]*?)```/g;
   let cmdMatch;
   while ((cmdMatch = cmdRegex.exec(text)) !== null) {
@@ -192,7 +214,10 @@ async function processAIResponse(text) {
     chatHistory.appendChild(badge);
     chatHistory.scrollTop = chatHistory.scrollHeight;
 
-    // Split args string safely
+    // Output beautifully colored headers to the Terminal
+    term.write(`\r\n\x1b[1;35m🤖 <Ai Executing>:\x1b[0m \x1b[1;36m${commandStr}\x1b[0m\r\n`);
+    term.write(`\x1b[1;33m💻 <Terminal Output>:\x1b[0m\r\n`);
+
     const args = commandStr.match(/(?:[^\s"]+|"[^"]*")+/g).map(s => s.replace(/"/g, ''));
     const process = await webcontainerInstance.spawn(args[0], args.slice(1), { cwd: `/${projectFolder}` });
     
@@ -206,12 +231,10 @@ async function processAIResponse(text) {
 
     const exitCode = await process.exit;
     if (exitCode !== 0) {
-      // Auto-Heal Trigger
       const errBadge = document.createElement('div');
       errBadge.className = `action-badge error`;
       errBadge.innerHTML = `<i class="codicon codicon-error"></i> <div><b>Error in command</b> <div class="sub-text">Don't worry, AI will fix it</div></div>`;
       chatHistory.appendChild(errBadge);
-      chatHistory.scrollTop = chatHistory.scrollHeight;
       
       setTimeout(() => {
         callOpenRouter(`The command "${commandStr}" failed with exit code ${exitCode}. Error output:\n${errorOutput}\n\nPlease fix the files or provide the correct command.`);
@@ -220,10 +243,9 @@ async function processAIResponse(text) {
   }
 }
 
-// Download ZIP logic
+// Download Recursive ZIP
 document.getElementById('download-zip-btn').addEventListener('click', async () => {
   const zip = new JSZip();
-  
   async function addFolder(dirPath, zipFolder) {
     const entries = await webcontainerInstance.fs.readdir(dirPath, { withFileTypes: true });
     for (const entry of entries) {
@@ -236,10 +258,8 @@ document.getElementById('download-zip-btn').addEventListener('click', async () =
       }
     }
   }
-  
   await addFolder(`/${projectFolder}`, zip);
   const blob = await zip.generateAsync({ type: "blob" });
-  
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
   a.download = `${projectFolder}.zip`;
@@ -254,16 +274,8 @@ function addChatMessage(text, sender) {
   chatHistory.scrollTop = chatHistory.scrollHeight;
 }
 
-// Global UI Listeners
 document.getElementById('send-btn').addEventListener('click', () => {
   const prompt = document.getElementById('prompt-input').value;
   if (prompt) callOpenRouter(prompt);
 });
-
-document.getElementById('toggle-term-btn').addEventListener('click', () => {
-  const t = terminalEl.style;
-  t.display = t.display === 'none' ? 'block' : 'none';
-  fitAddon.fit();
-});
-
 window.addEventListener('resize', () => fitAddon.fit());
