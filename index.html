@@ -3,26 +3,82 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Web CLI Sandbox</title>
+  <title>OpenRouter Web IDE</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
   <style>
-    body { background: #1e1e1e; color: #fff; font-family: sans-serif; margin: 0; padding: 10px; }
-    #toolbar { margin-bottom: 10px; display: flex; gap: 10px; flex-wrap: wrap; }
-    select, button { padding: 10px; background: #333; color: white; border: 1px solid #555; border-radius: 4px;}
-    #terminal { height: 75vh; width: 100%; background: #000; padding: 10px; box-sizing: border-box; }
+    :root { --sky-blue: #0ea5e9; --glow: 0 0 20px rgba(14, 165, 233, 0.4); }
+    body { background: #ffffff; color: #1a1a1a; font-family: -apple-system, sans-serif; margin: 0; padding: 0; height: 100vh; display: flex; flex-direction: column; }
+    
+    /* Screen Containers */
+    .screen { display: none; flex-direction: column; align-items: center; justify-content: center; height: 100%; width: 100%; padding: 20px; box-sizing: border-box; }
+    .active { display: flex; }
+
+    /* Glowing Button */
+    .glowing-btn {
+      background: white; color: var(--sky-blue); border: 2px solid var(--sky-blue);
+      padding: 16px 32px; font-size: 1.2rem; font-weight: bold; border-radius: 12px;
+      cursor: pointer; box-shadow: var(--glow); transition: all 0.2s;
+    }
+    .glowing-btn:active { box-shadow: 0 0 5px rgba(14, 165, 233, 0.8); transform: scale(0.98); }
+
+    /* Setup UI */
+    .input-box { width: 100%; max-width: 400px; padding: 12px; margin: 10px 0; border: 1px solid #ccc; border-radius: 8px; font-size: 1rem; }
+    
+    /* Workspace UI */
+    #workspace { display: none; flex-direction: column; height: 100vh; width: 100%; padding: 0; }
+    .header { background: #f8f9fa; padding: 15px; border-bottom: 1px solid #eee; display: flex; justify-content: space-between; align-items: center; }
+    .header span { font-weight: bold; color: var(--sky-blue); }
+    
+    .chat-container { flex: 1; overflow-y: auto; padding: 20px; background: #fafafa; display: flex; flex-direction: column; gap: 10px; }
+    .msg { padding: 12px; border-radius: 8px; max-width: 85%; font-size: 0.95rem; }
+    .msg.user { background: var(--sky-blue); color: white; align-self: flex-end; }
+    .msg.ai { background: white; border: 1px solid #eee; align-self: flex-start; }
+    
+    .input-area { display: flex; padding: 10px; background: white; border-top: 1px solid #eee; }
+    .chat-input { flex: 1; padding: 12px; border: 1px solid #ddd; border-radius: 8px 0 0 8px; font-size: 1rem; }
+    .send-btn { padding: 12px 20px; background: var(--sky-blue); color: white; border: none; border-radius: 0 8px 8px 0; font-weight: bold; }
+    
+    /* Terminal Container (Hidden by default) */
+    #terminal-container { height: 35vh; width: 100%; background: #000; display: none; }
+    #terminal-container.show { display: block; }
+    .toggle-term { background: none; border: 1px solid var(--sky-blue); color: var(--sky-blue); padding: 5px 10px; border-radius: 5px; }
   </style>
 </head>
 <body>
-  <div id="toolbar">
-    <select id="cli-selector">
-      <option value="cowsay hello from android!">Cowsay (Test)</option>
-      <option value="@anthropic-ai/claude-code">Claude Code</option>
-    </select>
-    <button id="run-btn">Run Tool</button>
+
+  <!-- Screen 1: Landing -->
+  <div id="screen-landing" class="screen active">
+    <button class="glowing-btn" id="start-btn">OpenRouter Code</button>
   </div>
-  <div id="terminal"></div>
-  
-  <!-- This map lets us use npm packages without Node.js -->
+
+  <!-- Screen 2: Setup VFS & API -->
+  <div id="screen-setup" class="screen">
+    <h2 style="margin-bottom: 5px;">Configure Workspace</h2>
+    <p style="color: #666; font-size: 0.9rem; text-align: center;">Set up your Virtual File System and AI access.</p>
+    <input type="text" id="vfs-folder" class="input-box" placeholder="Project Folder Name (e.g. my-app)" value="my-app">
+    <input type="password" id="api-key" class="input-box" placeholder="sk-or-v1-..." autocomplete="off">
+    <button class="glowing-btn" id="init-btn" style="margin-top: 20px;">Initialize CLI</button>
+  </div>
+
+  <!-- Screen 3: Workspace -->
+  <div id="workspace">
+    <div class="header">
+      <span id="workspace-title">/my-app</span>
+      <button class="toggle-term" id="toggle-term-btn">Show Terminal</button>
+    </div>
+    
+    <div class="chat-container" id="chat-history">
+      <div class="msg ai">WebContainer initialized. API key securely stored in memory. How can I help you build today?</div>
+    </div>
+    
+    <div class="input-area">
+      <input type="text" id="prompt-input" class="chat-input" placeholder="Ask OpenRouter to write code or run commands...">
+      <button id="send-btn" class="send-btn">Send</button>
+    </div>
+    
+    <div id="terminal-container"></div>
+  </div>
+
   <script type="importmap">
     {
       "imports": {
